@@ -1,0 +1,35 @@
+services:
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5674:5672"
+      - "15674:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  consumer:
+    build: .
+    command: ["python", "-m", "app.consumer"]
+    restart: on-failure
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      READ_MODEL_FILE: /data/read_model.json
+      EVENTS_LOG_FILE: /data/events.jsonl
+    volumes:
+      - ./data:/data
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  producer:
+    build: .
+    command: ["python", "-m", "app.producer"]
+    profiles: ["tools"]
+    environment:
+      RABBITMQ_HOST: rabbitmq
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
