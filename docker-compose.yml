@@ -24,12 +24,27 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  api:
+    build: .
+    command: ["python", "-m", "app.api"]
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      API_PORT: 8080
+      READ_MODEL_FILE: /data/read_model.json
+    volumes:
+      - ./data:/data
+    ports:
+      - "8084:8080"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
   producer:
     build: .
     command: ["python", "-m", "app.producer"]
     profiles: ["tools"]
     environment:
-      RABBITMQ_HOST: rabbitmq
+      API_BASE_URL: http://api:8080
     depends_on:
-      rabbitmq:
-        condition: service_healthy
+      api:
+        condition: service_started

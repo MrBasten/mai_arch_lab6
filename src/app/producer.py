@@ -1,129 +1,103 @@
-﻿import json
+import json
 import time
-import uuid
-from datetime import UTC, datetime
-
-import pika
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 from app import settings
 
 
-def event_time() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def pack_message(event_type: str, routing_key: str, payload: dict) -> tuple[str, dict]:
-    data = {
-        "event_id": str(uuid.uuid4()),
-        "event_type": event_type,
-        "event_version": 1,
-        "occurred_at": event_time(),
-        "producer": "booking-api",
-        "trace_id": str(uuid.uuid4()),
-        "payload": payload,
-    }
-    return routing_key, data
-
-
-def booking_story() -> list[tuple[str, dict]]:
-    return [
-        pack_message(
-            "UserRegistered",
-            "user.registered",
-            {
-                "user_id": 501,
-                "login": "event_user",
-                "first_name": "Petr",
-                "last_name": "Sokolov",
-                "email": "event_user@example.com",
-            },
-        ),
-        pack_message(
-            "HotelCreated",
-            "hotel.created",
-            {
-                "hotel_id": 301,
-                "title": "Event Hotel",
-                "city": "Moscow",
-                "address": "Arbat 10",
-                "rooms": 12,
-            },
-        ),
-        pack_message(
-            "BookingCreated",
-            "booking.created",
-            {
-                "booking_id": 7001,
-                "user_id": 501,
-                "hotel_id": 301,
-                "date_from": "2026-12-01",
-                "date_to": "2026-12-04",
-                "status": "active",
-            },
-        ),
-        pack_message(
-            "BookingCancelled",
-            "booking.cancelled",
-            {
-                "booking_id": 7001,
-                "user_id": 501,
-                "reason": "user request",
-                "status": "cancelled",
-            },
-        ),
-    ]
-
-
-def rabbit_connection() -> pika.BlockingConnection:
-    params = pika.ConnectionParameters(
-        host=settings.RABBITMQ_HOST,
-        port=settings.RABBITMQ_PORT,
-        heartbeat=30,
-        blocked_connection_timeout=30,
+def call_api(method: str, path: str, payload: dict) -> dict | list:
+    data = json.dumps(payload).encode("utf-8") if payload else None
+    request = Request(
+        settings.API_BASE_URL + path,
+        data=data,
+        method=method,
+        headers={"Content-Type": "application/json"},
     )
+    with urlopen(request, timeout=10) as response:
+        return json.loads(response.read().decode("utf-8"))
 
+
+def wait_api() -> None:
     last_error = None
-    for _ in range(60):
+    for _ in range(30):
         try:
-            return pika.BlockingConnection(params)
-        except pika.exceptions.AMQPConnectionError as exc:
+            call_api("GET", "/health", {})
+            return
+        except (TimeoutError, URLError) as exc:
             last_error = exc
             time.sleep(1)
-    raise RuntimeError(f"RabbitMQ is not available: {last_error}")
+    raise RuntimeError(f"Booking API is not available: {last_error}")
+
+
+def wait_read_api(user_id: int, hotel_id: int, booking_id: int) -> None:
+    last_error = "read model is empty"
+    for _ in range(30):
+        users = call_api("GET", "/api/v1/users?login=event_user", {})
+        hotels = call_api("GET", "/api/v1/hotels?city=Moscow", {})
+        bookings = call_api("GET", f"/api/v1/users/{user_id}/bookings", {})
+
+        has_user = any(item.get("user_id") == user_id for item in users)
+        has_hotel = any(item.get("hotel_id") == hotel_id for item in hotels)
+        has_booking = any(
+            item.get("booking_id") == booking_id and item.get("status") == "cancelled"
+            for item in bookings
+        )
+        if has_user and has_hotel and has_booking:
+            print("read API returned user, hotel and cancelled booking")
+            return
+
+        last_error = {
+            "users": users,
+            "hotels": hotels,
+            "bookings": bookings,
+        }
+        time.sleep(1)
+    raise RuntimeError(f"Read API was not synchronized: {last_error}")
 
 
 def main() -> None:
-    connection = rabbit_connection()
-    channel = connection.channel()
-    channel.exchange_declare(
-        exchange=settings.EXCHANGE_NAME,
-        exchange_type="topic",
-        durable=True,
-    )
-    channel.queue_declare(queue=settings.QUEUE_NAME, durable=True)
-    channel.queue_bind(
-        exchange=settings.EXCHANGE_NAME,
-        queue=settings.QUEUE_NAME,
-        routing_key="#",
-    )
-    channel.confirm_delivery()
+    wait_api()
 
-    for routing_key, data in booking_story():
-        channel.basic_publish(
-            exchange=settings.EXCHANGE_NAME,
-            routing_key=routing_key,
-            body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
-            properties=pika.BasicProperties(
-                content_type="application/json",
-                delivery_mode=2,
-                message_id=data["event_id"],
-                type=data["event_type"],
-            ),
-            mandatory=True,
-        )
-        print(f"sent {data['event_type']} as {routing_key}")
+    user = call_api(
+        "POST",
+        "/api/v1/auth/register",
+        {
+            "login": "event_user",
+            "first_name": "Petr",
+            "last_name": "Sokolov",
+            "email": "event_user@example.com",
+        },
+    )
+    print(f"POST /api/v1/auth/register -> {user}")
 
-    connection.close()
+    hotel = call_api(
+        "POST",
+        "/api/v1/hotels",
+        {
+            "title": "Event Hotel",
+            "city": "Moscow",
+            "address": "Arbat 10",
+            "rooms": 12,
+        },
+    )
+    print(f"POST /api/v1/hotels -> {hotel}")
+
+    booking = call_api(
+        "POST",
+        "/api/v1/bookings",
+        {
+            "user_id": user["id"],
+            "hotel_id": hotel["id"],
+            "date_from": "2026-12-01",
+            "date_to": "2026-12-04",
+        },
+    )
+    print(f"POST /api/v1/bookings -> {booking}")
+
+    cancelled = call_api("DELETE", f"/api/v1/bookings/{booking['id']}", {})
+    print(f"DELETE /api/v1/bookings/{booking['id']} -> {cancelled}")
+    wait_read_api(user["id"], hotel["id"], booking["id"])
 
 
 if __name__ == "__main__":

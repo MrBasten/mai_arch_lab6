@@ -10,10 +10,41 @@
 
 | Команда | Событие | Кто публикует |
 |---|---|---|
-| `RegisterUser` | `UserRegistered` | сервис пользователей |
-| `CreateHotel` | `HotelCreated` | сервис отелей |
-| `CreateBooking` | `BookingCreated` | сервис бронирований |
-| `CancelBooking` | `BookingCancelled` | сервис бронирований |
+| `RegisterUser` | `UserRegistered` | Booking API / сервис пользователей |
+| `CreateHotel` | `HotelCreated` | Booking API / сервис отелей |
+| `CreateBooking` | `BookingCreated` | Booking API / сервис бронирований |
+| `CancelBooking` | `BookingCancelled` | Booking API / сервис бронирований |
+
+## Связь с API
+
+Событийная часть не живет отдельно от REST API. Клиент отправляет HTTP-команду в `Booking API`, API проверяет входные данные и меняет write-модель, а затем публикует событие в RabbitMQ.
+
+В работе реализованы следующие HTTP-команды:
+
+| Метод | Endpoint | Команда | Публикуемое событие |
+|---|---|---|---|
+| `POST` | `/api/v1/auth/register` | `RegisterUser` | `UserRegistered` |
+| `POST` | `/api/v1/hotels` | `CreateHotel` | `HotelCreated` |
+| `POST` | `/api/v1/bookings` | `CreateBooking` | `BookingCreated` |
+| `DELETE` | `/api/v1/bookings/{id}` | `CancelBooking` | `BookingCancelled` |
+
+Реализация API находится в [`src/app/api.py`](./src/app/api.py). Сценарный клиент [`src/app/producer.py`](./src/app/producer.py) больше не публикует сообщения напрямую в RabbitMQ: он вызывает HTTP API, а события появляются в брокере уже со стороны `booking-api`.
+
+Запросы из варианта задания тоже остаются частью API, но они не создают событий. Они читают готовое представление, которое consumer собирает из очереди:
+
+| Метод | Endpoint | Операция | Источник данных |
+|---|---|---|---|
+| `GET` | `/api/v1/users?login=...` | Поиск пользователя по логину | read-модель |
+| `GET` | `/api/v1/users?name=...` | Поиск пользователя по имени или фамилии | read-модель |
+| `GET` | `/api/v1/hotels` | Получение списка отелей | read-модель |
+| `GET` | `/api/v1/hotels?city=...` | Поиск отелей по городу | read-модель |
+| `GET` | `/api/v1/users/{id}/bookings` | Получение бронирований пользователя | read-модель |
+
+Поток взаимодействия:
+
+```text
+Client -> Booking API -> RabbitMQ topic exchange -> Consumer -> data/read_model.json
+```
 
 ## RabbitMQ
 
@@ -25,6 +56,8 @@
 - очередь `booking.read_model`;
 - ключи маршрутизации `user.registered`, `hotel.created`, `booking.created`, `booking.cancelled`.
 
+Выбран `topic exchange`, потому что события принадлежат разным доменным областям (`user`, `hotel`, `booking`) и потребители могут подписываться как на все события (`#`), так и на отдельные группы (`booking.*`).
+
 ## Отправители событий
 
 События публикуют части системы, которые меняют данные:
@@ -33,7 +66,7 @@
 - сервис отелей публикует `HotelCreated`;
 - сервис бронирований публикует `BookingCreated` и `BookingCancelled`.
 
-В проекте отправка показана в [`src/app/producer.py`](./src/app/producer.py): файл отправляет один подготовленный набор событий в RabbitMQ.
+В проекте отправка встроена в [`src/app/api.py`](./src/app/api.py): API публикует событие только после успешной обработки команды. Это отражает связь с REST API из предыдущих лабораторных работ.
 
 ## Получатели событий
 
@@ -90,23 +123,27 @@ data/read_model.json
 
 Там лежат пользователи, отели, бронирования и список уведомлений.
 
+Синхронизация происходит так: `Booking API` записывает изменение в write-модель и публикует событие, consumer применяет это событие к read-модели, после чего query endpoints API начинают возвращать обновленные данные.
+
 ## Создание бронирования
 
 Сценарий включает:
 
-1. клиент отправляет команду `CreateBooking`;
-2. сервис бронирований проверяет пользователя, отель и даты;
-3. бронь сохраняется на стороне записи;
-4. публикуется событие `BookingCreated`;
-5. обработчик чтения добавляет бронь в `data/read_model.json`;
-6. сервис уведомлений отправляет подтверждение пользователю.
+1. клиент отправляет HTTP-запрос `POST /api/v1/bookings`;
+2. `Booking API` преобразует запрос в команду `CreateBooking`;
+3. API проверяет пользователя, отель и даты;
+4. бронь сохраняется на стороне записи;
+5. API публикует событие `BookingCreated` в RabbitMQ;
+6. обработчик чтения добавляет бронь в `data/read_model.json`;
+7. сервис уведомлений отправляет подтверждение пользователю.
 
 ## Отмена бронирования
 
 Сценарий включает:
 
-1. клиент отправляет команду `CancelBooking`;
-2. сервис бронирований меняет статус брони на `cancelled`;
-3. публикуется событие `BookingCancelled`;
-4. обработчик чтения обновляет статус в `data/read_model.json`;
-5. сервис уведомлений отправляет сообщение об отмене.
+1. клиент отправляет HTTP-запрос `DELETE /api/v1/bookings/{id}`;
+2. `Booking API` преобразует запрос в команду `CancelBooking`;
+3. сервис бронирований меняет статус брони на `cancelled`;
+4. API публикует событие `BookingCancelled` в RabbitMQ;
+5. обработчик чтения обновляет статус в `data/read_model.json`;
+6. сервис уведомлений отправляет сообщение об отмене.

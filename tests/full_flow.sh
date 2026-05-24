@@ -14,7 +14,7 @@ compose() {
 }
 
 compose down --remove-orphans >/dev/null 2>&1 || true
-compose up -d --build rabbitmq consumer
+compose up -d --build rabbitmq api consumer
 
 compose run --rm --build producer
 

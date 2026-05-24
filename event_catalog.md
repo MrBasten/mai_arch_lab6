@@ -14,11 +14,26 @@
 
 Для всех событий используется доставка `at-least-once`.
 
+## Связь событий с API
+
+Все события публикуются не тестовым скриптом напрямую, а HTTP API после успешной обработки команды.
+
+| API endpoint | Команда | Routing key | Событие |
+|---|---|---|---|
+| `POST /api/v1/auth/register` | `RegisterUser` | `user.registered` | `UserRegistered` |
+| `POST /api/v1/hotels` | `CreateHotel` | `hotel.created` | `HotelCreated` |
+| `POST /api/v1/bookings` | `CreateBooking` | `booking.created` | `BookingCreated` |
+| `DELETE /api/v1/bookings/{id}` | `CancelBooking` | `booking.cancelled` | `BookingCancelled` |
+
+Источник в поле `producer` для этих событий: `booking-api`.
+
 ## UserRegistered
 
 Ключ маршрутизации: `user.registered`
 
-Публикует: сервис пользователей.
+Публикует: `Booking API` после команды `RegisterUser`.
+
+Гарантия доставки: `at-least-once`.
 
 Читают:
 
@@ -44,7 +59,9 @@
 
 Ключ маршрутизации: `hotel.created`
 
-Публикует: сервис отелей.
+Публикует: `Booking API` после команды `CreateHotel`.
+
+Гарантия доставки: `at-least-once`.
 
 Читают:
 
@@ -70,7 +87,9 @@
 
 Ключ маршрутизации: `booking.created`
 
-Публикует: сервис бронирований.
+Публикует: `Booking API` после команды `CreateBooking`.
+
+Гарантия доставки: `at-least-once`.
 
 Читают:
 
@@ -98,7 +117,9 @@
 
 Ключ маршрутизации: `booking.cancelled`
 
-Публикует: сервис бронирований.
+Публикует: `Booking API` после команды `CancelBooking`.
+
+Гарантия доставки: `at-least-once`.
 
 Читают:
 
